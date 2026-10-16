@@ -3,19 +3,22 @@ ESS per gradient (from the autocorrelation of phibar) vs lambda."""
 import numpy as np, matplotlib.pyplot as plt
 from mclmc import MCLMC, make_phi4, integrated_autocorr_time
 
-Lsize, n = 16, 5000
+Lsize, n = 32, 10000
 lams = [6.0, 5.0, 4.6, 4.25, 4.0, 3.6]          # annealed from high to low
 rng = np.random.default_rng(0)
 
-def hmc(f, x, n, num_steps=20, eps=0.1, warmup=500):
+def hmc(f, x, n, num_steps=20, eps=0.02, warmup=500):
     lp, g = f(x); out, grads = [], 0
     for t in range(warmup + n):
         p = rng.standard_normal(x.size); H0 = -lp + 0.5 * p @ p
         xn, gn, pn = x, g, p + 0.5 * eps * g
-        for i in range(num_steps):
-            xn = xn + eps * pn; lpn, gn = f(xn)
-            pn = pn + (eps if i < num_steps - 1 else 0.5 * eps) * gn
-        acc = min(1, np.exp(H0 - (-lpn + 0.5 * pn @ pn)))
+        with np.errstate(all="ignore"):   # a too-large step can blow up phi^4
+            for i in range(num_steps):
+                xn = xn + eps * pn; lpn, gn = f(xn)
+                if not np.isfinite(lpn): break
+                pn = pn + (eps if i < num_steps - 1 else 0.5 * eps) * gn
+            H1 = -lpn + 0.5 * pn @ pn
+            acc = min(1.0, np.exp(H0 - H1)) if np.isfinite(H1) else 0.0  # diverged: reject
         if rng.random() < acc: x, lp, g = xn, lpn, gn
         if t < warmup: eps *= np.exp((acc - 0.8) / (t + 1) ** 0.6)  # tune step
         else: out.append(x.mean()); grads += num_steps
@@ -41,4 +44,4 @@ a1.set_ylabel(r"$\chi = L^2\,\mathrm{Var}(\bar\phi)$"); a1.legend()
 a2.set_ylabel(r"ESS($\bar\phi$) / gradient"); a2.set_yscale("log")
 a2.set_xlabel(r"$\lambda$  ($m^2=-4$, line at $\lambda_c\approx4.25$)")
 a1.set_title(f"Lattice $\\phi^4$, L = {Lsize}")
-fig.tight_layout(); fig.savefig("comparison_L16.png", dpi=150)
+fig.tight_layout(); fig.savefig("comparison_L32.png", dpi=150)
