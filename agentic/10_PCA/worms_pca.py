@@ -159,6 +159,112 @@ def pca(X):
     return mean, evals[order], evecs[:, order]  # columns = eigenworms
 
 
+# ---------------------------------------------------------------- reconstruction
+
+def reconstruct(theta, mean, evecs, k):
+    """
+    Project angle rows onto the first k eigenworms and map back:
+        a = (theta - mean) @ V_k        (k numbers per frame)
+        theta_hat = mean + a @ V_k^T    (back to n_points - 1 angles)
+    """
+    Vk = evecs[:, :k]
+    return mean + ((theta - mean) @ Vk) @ Vk.T
+
+
+def angles_to_xy(theta):
+    """
+    Integrate tangent angles back into a midline with body length 1, centred
+    on its centroid. theta: (..., n_seg) -> x, y: (..., n_seg + 1).
+    Because each frame's mean angle and position were discarded, this recovers
+    the shape exactly but in a standard orientation/position.
+    """
+    ds = 1.0 / theta.shape[-1]
+    zero = np.zeros(theta.shape[:-1] + (1,))
+    x = np.concatenate([zero, np.cumsum(np.cos(theta), axis=-1) * ds], axis=-1)
+    y = np.concatenate([zero, np.cumsum(np.sin(theta), axis=-1) * ds], axis=-1)
+    return x - x.mean(axis=-1, keepdims=True), y - y.mean(axis=-1, keepdims=True)
+
+
+def reconstruction_analysis(X, mean, evecs, out, show_modes, n_examples=4):
+    """
+    Reconstruct every frame from 1..max_k modes and measure the error, both in
+    tangent angles and in actual body position (fraction of body length).
+    """
+    n_seg = X.shape[1]
+    max_k = min(n_seg, max(10, max(show_modes)))
+    ks = np.arange(1, max_k + 1)
+    xo, yo = angles_to_xy(X)
+    total = ((X - mean) ** 2).sum()
+
+    ang_rms, unexpl, pos_mean, pos_p95, pos_frames = [], [], [], [], {}
+    for k in ks:
+        Xr = reconstruct(X, mean, evecs, k)
+        ang_rms.append(np.sqrt(((X - Xr) ** 2).mean()))
+        unexpl.append(((X - Xr) ** 2).sum() / total)
+        xr, yr = angles_to_xy(Xr)
+        per_frame = np.hypot(xr - xo, yr - yo).mean(axis=1)  # mean point error
+        pos_mean.append(per_frame.mean())
+        pos_p95.append(np.percentile(per_frame, 95))
+        if k in show_modes:
+            pos_frames[k] = per_frame
+    ang_rms, unexpl = np.array(ang_rms), np.array(unexpl)
+    pos_mean, pos_p95 = np.array(pos_mean), np.array(pos_p95)
+
+    print(f"\nReconstruction from top-k eigenworms ({len(X)} frames)")
+    print("   k   var. unexplained   angle RMS (rad)   "
+          "point error mean / 95th pct (% body length)")
+    for i, k in enumerate(ks):
+        mark = " <" if k in show_modes else ""
+        print(f"  {k:2d}   {100*unexpl[i]:12.2f}%   {ang_rms[i]:12.4f}      "
+              f"{100*pos_mean[i]:8.2f} / {100*pos_p95[i]:.2f}{mark}")
+
+    # ---- figure
+    fig = plt.figure(figsize=(4 * n_examples, 8))
+    gs = fig.add_gridspec(2, n_examples)
+    half = max(1, n_examples // 2)
+
+    ax = fig.add_subplot(gs[0, :half])
+    ax.semilogy(ks, 100 * unexpl, "o-", label="variance unexplained (angles)")
+    ax.semilogy(ks, 100 * pos_mean, "s-", label="mean point error (% body length)")
+    ax.semilogy(ks, 100 * pos_p95, "s--", label="95th pct point error")
+    ax.set(xlabel="number of eigenworms k", ylabel="%",
+           title="Reconstruction error vs number of modes", xticks=ks)
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend()
+
+    ax = fig.add_subplot(gs[0, half:])
+    bins = np.linspace(0, np.percentile(pos_frames[min(show_modes)], 99.5) * 100, 80)
+    for k in show_modes:
+        ax.hist(100 * pos_frames[k], bins=bins, histtype="step", lw=1.5,
+                label=f"k = {k}")
+    ax.set(xlabel="mean point error per frame (% body length)", ylabel="frames",
+           title="Per-frame reconstruction error")
+    ax.legend()
+
+    # Example frames: typical to hard, ranked by error with the fewest modes
+    err = pos_frames[min(show_modes)]
+    order = np.argsort(err)
+    pcts = np.linspace(50, 99, n_examples)
+    idx = [order[int(p / 100 * (len(order) - 1))] for p in pcts]
+    for j, (i, p) in enumerate(zip(idx, pcts)):
+        ax = fig.add_subplot(gs[1, j])
+        ax.plot(xo[i], yo[i], "k-", lw=4, alpha=0.3, label="original")
+        ax.plot(xo[i, 0], yo[i, 0], "ko", ms=6, alpha=0.4)  # head
+        for k in show_modes:
+            xr, yr = angles_to_xy(reconstruct(X[i:i + 1], mean, evecs, k))
+            ax.plot(xr[0], yr[0], lw=1.5, label=f"k = {k}")
+        ax.set(aspect="equal", xticks=[], yticks=[],
+               title=f"frame {i} ({p:.0f}th pct error at k={min(show_modes)})")
+        if j == 0:
+            ax.legend(fontsize=8)
+
+    fig.tight_layout()
+    path = os.path.join(out, "eigenworms_reconstruction.png")
+    fig.savefig(path, dpi=150)
+    print(f"Saved {path}")
+    return ks, unexpl, ang_rms, pos_mean, pos_p95
+
+
 # ---------------------------------------------------------------- main
 
 def collect_files(inputs):
@@ -181,7 +287,11 @@ def main():
     ap.add_argument("--n-modes", type=int, default=4,
                     help="eigenworms to plot and project onto (default 4)")
     ap.add_argument("--out", default="eigenworm_results", help="output folder")
+    ap.add_argument("--recon-modes", default="3,4,8",
+                    help="comma-separated mode counts to compare in the "
+                         "reconstruction figure (default 3,4,8)")
     args = ap.parse_args()
+    show_modes = sorted({int(v) for v in args.recon_modes.split(",")})
 
     files = collect_files(args.inputs)
     if not files:
@@ -296,6 +406,9 @@ def main():
         fig2_path = os.path.join(args.out, "eigenworms_phase.png")
         fig2.savefig(fig2_path, dpi=150)
         print(f"Saved {fig2_path}")
+
+    # ---- how many modes are needed to rebuild the posture?
+    reconstruction_analysis(X, mean, evecs, args.out, show_modes)
 
 
 if __name__ == "__main__":
