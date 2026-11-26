@@ -3,7 +3,12 @@
 possible next steps: see if mutants behave differently,
 make a simulation of a wiggling line that behaves the same way
 simulate motion with some different condition
+
+Wildtype worms data from:
 https://zenodo.org/records/1031222, https://zenodo.org/records/1014381, https://zenodo.org/records/1022286, https://zenodo.org/records/1007437, https://zenodo.org/records/1006406
+
+unc-4 mutant:
+https://zenodo.org/records/1018964, https://zenodo.org/records/1003537, https://zenodo.org/records/1033763
 
 Eigenworm analysis of C. elegans posture from OpenWorm .wcon.zip files.
 
